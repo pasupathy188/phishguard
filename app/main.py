@@ -34,7 +34,7 @@ from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-
+from slowapi.middleware import SlowAPIMiddleware
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import config
 from app.features import extract_features, is_known_safe_domain
@@ -52,6 +52,7 @@ app = FastAPI(title="PhishGuard", version="1.0.0")
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{config.RATE_LIMIT_PER_MINUTE}/minute"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # --- API key auth ---
 # Disabled entirely if PHISHGUARD_API_KEYS is unset/empty (local dev default).
