@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -v
+
+      - name: Generate synthetic data for CI smoke test
+        run: python scripts/generate_synthetic_data.py
+
+      - name: Smoke-test training pipeline
+        # Runs the FULL training script including the recall quality gate.
+        # If the gate fails (exit code 1), this step - and the whole
+        # workflow - fails. This is the actual enforcement point: unlike a
+        # local run where a rejected model just doesn't get saved, here a
+        # gate failure blocks the PR/merge itself.
+        run: python scripts/train_model.py
+
+      - name: Verify model artifact was produced
+        run: |
+          test -f model/phishing_model.joblib || (echo "Model artifact missing - training gate likely failed" && exit 1)
+          test -f model/metrics.json || (echo "Metrics file missing" && exit 1)
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: |
+            model/phishing_model.joblib
+            model/metrics.json
+          retention-days: 14

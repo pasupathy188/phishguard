@@ -1,0 +1,38 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model:/app/model:ro   # model is read-only in the serving container
+    environment:
+      - PHISHGUARD_MODEL_FILE=/app/model/phishing_model.joblib
+      - PHISHGUARD_KAFKA_ENABLED=false
+      - PHISHGUARD_LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # --- Kafka stack is OPTIONAL and only needed if you want streaming mode. ---
+  # Start it explicitly with: docker compose --profile streaming up
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    profiles: ["streaming"]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    profiles: ["streaming"]
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1

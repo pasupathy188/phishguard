@@ -1,0 +1,6 @@
+model/*.joblib 
+model/metrics.json 
+model/registry.json 
+__pycache__/ 
+.pytest_cache/ 
+*.pyc 
