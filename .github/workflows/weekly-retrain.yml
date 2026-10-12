@@ -1,0 +1,63 @@
+name: Weekly Retrain
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download real dataset from GitHub Release
+        run: |
+          mkdir -p dataset
+          gh release download dataset-v1 --pattern "*.csv" --dir dataset --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retrain on real data
+        run: python scripts/train_model.py
+        env:
+          PHISHGUARD_RAW_DATA_FILE: dataset/malicious_benign_URL_dataset_v2.csv
+          PHISHGUARD_TRAIN_SAMPLE_ROWS: "1000000"
+          PHISHGUARD_N_ESTIMATORS: "300"
+          PHISHGUARD_NGRAM_ENABLED: "false"
+
+      - name: Verify model artifacts exist
+        run: |
+          test -f model/phishing_model.joblib || (echo "phishing_model.joblib missing" && exit 1)
+          test -f model/metrics.json || (echo "metrics.json missing" && exit 1)
+          test -f model/registry.json || (echo "registry.json missing" && exit 1)
+
+      - name: Commit retrained model if the gate passed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f model/phishing_model.joblib \
+                     model/phishing_model_*.joblib \
+                     model/metrics.json \
+                     model/registry.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit - model metrics unchanged."
+          else
+            git commit -m "Weekly retrain: $(date -u +'%Y-%m-%d')"
+            git push
+          fi
