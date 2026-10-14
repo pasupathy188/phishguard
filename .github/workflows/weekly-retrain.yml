@@ -26,12 +26,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Download real dataset from GitHub Release
-        run: |
-          mkdir -p dataset
-          gh release download dataset-v1 --pattern "*.csv" --dir dataset --clobber
+            - name: Download dataset from Kaggle
+        run: python scripts/fetch_dataset.py
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
 
       - name: Retrain on real data
         run: python scripts/train_model.py
