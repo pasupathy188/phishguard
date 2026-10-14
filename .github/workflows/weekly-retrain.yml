@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-            - name: Download dataset from Kaggle
+      - name: Download dataset from Kaggle
         run: python scripts/fetch_dataset.py
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
