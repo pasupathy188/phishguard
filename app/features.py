@@ -24,6 +24,10 @@ SUSPICIOUS_KEYWORDS = (
 )
 _KEYWORD_PATTERN = re.compile("|".join(SUSPICIOUS_KEYWORDS), re.IGNORECASE)
 
+# Strip schemes (http://, https://, ftp://, etc.) so training and serving
+# compute features on identical strings.
+_SCHEME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
 # A syntactically valid IPv4 octet is 0-255. The naive `\d+\.\d+\.\d+\.\d+`
 # regex used in the original draft also matches garbage like "1.2.3.4000".
 _IPV4_OCTET = r"(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)"
@@ -71,7 +75,6 @@ class URLFeatures:
     num_digits: int
     num_special_chars: int
     has_ip_host: int
-    is_https: int
     has_suspicious_keyword: int
     entropy: float
     subdomain_count: int
@@ -91,11 +94,6 @@ class URLFeatures:
 def _shannon_entropy(s: str) -> float:
     """
     Correct Shannon entropy over the character distribution of `s`.
-
-    The original draft's version had two real bugs:
-      1. No guard for empty string -> ZeroDivisionError masked by a bare except.
-      2. Because it recomputed count/len per unique char inline, it was easy
-         to get subtly wrong; here it's computed explicitly and unit-tested.
     """
     if not s:
         return 0.0
@@ -128,9 +126,7 @@ def _get_tld(host: str) -> str:
 def _has_brand_lookalike(host: str) -> int:
     """
     Flags when a known brand name appears in the host, but the host is NOT
-    that brand's actual registered domain. E.g. 'paypal-secure-login.com'
-    contains 'paypal' but isn't paypal.com -> flagged. 'www.paypal.com'
-    contains 'paypal' AND is paypal.com -> not flagged.
+    that brand's actual registered domain.
     """
     if not host:
         return 0
@@ -143,16 +139,13 @@ def _has_brand_lookalike(host: str) -> int:
 
 def _has_leet_brand_substitution(host: str) -> int:
     """
-    Flags brand names hidden via leetspeak-style character substitution,
-    e.g. 'payp4l.com' or 'amaz0n-verify.net' - normalizes digits back to
-    likely letters and checks for a brand match that wasn't already caught
-    by the plain substring check.
+    Flags brand names hidden via leetspeak-style character substitution.
     """
     if not host:
         return 0
     normalized = host.lower().translate(_LEET_MAP)
     if normalized == host.lower():
-        return 0  # no substitution chars present, nothing new to detect
+        return 0
     registrable = _registrable_domain(host)
     if registrable in _LEGIT_BRAND_DOMAINS:
         return 0
@@ -160,23 +153,13 @@ def _has_leet_brand_substitution(host: str) -> int:
 
 
 def _domain_digit_ratio(host: str) -> float:
-    """High digit density in a hostname (not a subdomain like 'cdn2') is a
-    common obfuscation/randomly-generated-domain signal."""
+    """High digit density in a hostname is a common obfuscation signal."""
     if not host:
         return 0.0
     digits = sum(c.isdigit() for c in host)
     return round(digits / len(host), 4)
 
 
-# Well-known, unambiguously legitimate root domains. Checked BEFORE the model
-# runs, not after - these bypass classification entirely rather than relying
-# on the model to score them correctly. This exists because testing revealed
-# the model (trained mostly on URLs with paths/subdomains) has weak signal
-# on bare root domains and produces false positives on major legitimate
-# sites once the recall-tuned decision threshold is applied. An allowlist is
-# a standard production pattern for exactly this kind of known-good bypass -
-# it does not fix the underlying training-data distribution gap, it only
-# prevents that gap from causing embarrassing false positives on top sites.
 KNOWN_SAFE_DOMAINS = frozenset({
     "google.com", "github.com", "microsoft.com", "apple.com", "amazon.com",
     "wikipedia.org", "stackoverflow.com", "nytimes.com", "bbc.com",
@@ -197,33 +180,29 @@ def is_known_safe_domain(host: str) -> bool:
 def extract_features(url: str) -> URLFeatures:
     """
     Extract a fixed-schema feature vector from a raw URL string.
-
-    Never raises on malformed input: unparseable URLs degrade gracefully to
-    a "maximally suspicious / minimal information" feature vector rather than
-    crashing the caller. Callers (API, training) can still choose to reject
-    empty input upstream, but this function itself is total.
     """
     if not isinstance(url, str) or not url.strip():
-        # Degenerate input: return a well-defined zero-ish vector rather than
-        # raising, so a single bad row can't crash a batch training job.
         return URLFeatures(
             url_length=0, num_dots=0, num_hyphens=0, num_underscores=0,
             num_slashes=0, num_digits=0, num_special_chars=0, has_ip_host=0,
-            is_https=0, has_suspicious_keyword=0, entropy=0.0, subdomain_count=0,
+            has_suspicious_keyword=0, entropy=0.0, subdomain_count=0,
             has_high_risk_tld=0, has_brand_lookalike=0,
             has_leet_brand_substitution=0, domain_digit_ratio=0.0,
         )
 
     url = url.strip()
 
+    # Strip the scheme so training and serving compute identical features
+    url = _SCHEME_PATTERN.sub("", url)
+
     try:
-        parsed = urlparse(url if "//" in url else f"//{url}")
+        parsed = urlparse("//" + url.lstrip("/"))
         host = parsed.hostname or ""
     except ValueError:
         host = ""
 
     special_chars = sum(1 for c in url if not c.isalnum() and c not in ".-_/:")
-
+    
     return URLFeatures(
         url_length=len(url),
         num_dots=url.count("."),
@@ -233,7 +212,6 @@ def extract_features(url: str) -> URLFeatures:
         num_digits=sum(c.isdigit() for c in url),
         num_special_chars=special_chars,
         has_ip_host=_is_ip_host(host),
-        is_https=1 if url.lower().startswith("https://") else 0,
         has_suspicious_keyword=1 if _KEYWORD_PATTERN.search(url) else 0,
         entropy=round(_shannon_entropy(url), 4),
         subdomain_count=max(host.count(".") - 1, 0) if host else 0,

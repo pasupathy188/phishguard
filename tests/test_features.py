@@ -41,9 +41,13 @@ def test_invalid_ipv4_like_string_not_flagged():
     assert feats.has_ip_host == 0
 
 
-def test_https_detection_case_insensitive():
-    assert extract_features("HTTPS://example.com").is_https == 1
-    assert extract_features("http://example.com").is_https == 0
+def test_scheme_does_not_change_features():
+    """The scheme is stripped before feature extraction, so HTTP, HTTPS, and
+    scheme-less URLs must produce identical feature vectors. This guards
+    against the train/serve skew that caused `is_https` to be a no-op."""
+    assert extract_features("https://example.com/a") == extract_features("example.com/a")
+    assert extract_features("http://example.com/a") == extract_features("example.com/a")
+    assert extract_features("HTTPS://example.com/a") == extract_features("example.com/a")
 
 
 def test_suspicious_keyword_detected():
@@ -91,6 +95,10 @@ def test_known_safe_domain_allowlist():
     assert is_known_safe_domain("www.github.com") is True
     assert is_known_safe_domain("totally-not-github.com") is False
     assert is_known_safe_domain("") is False
+
+def test_host_parsed_when_url_contains_embedded_scheme():
+    feats = extract_features("http://192.168.1.1/go?u=http://x.com")
+    assert feats.has_ip_host == 1
 
 
 if __name__ == "__main__":
