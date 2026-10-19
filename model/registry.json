@@ -1,9 +1,18 @@
 {
-  "current": "phishing_model_20261014_162627.joblib",
+  "current": "phishing_model_20261019_083109.joblib",
   "versions": [
     {
       "file": "phishing_model_20261014_162627.joblib",
       "trained_at": "20261014_162627",
+      "recall": 0.8527,
+      "precision": 0.7822,
+      "roc_auc": 0.9325,
+      "decision_threshold": 0.38,
+      "n_train": 800000
+    },
+    {
+      "file": "phishing_model_20261019_083109.joblib",
+      "trained_at": "20261019_083109",
       "recall": 0.8527,
       "precision": 0.7822,
       "roc_auc": 0.9325,
