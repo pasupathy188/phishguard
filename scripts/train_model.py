@@ -38,6 +38,7 @@ from app import config
 from app.features import extract_features, URLFeatures
 from app.data_validation import validate_raw_data
 from app.model_registry import register_model
+from app.ngram_model import train_ngram_model, predict_ngram_proba
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -135,48 +136,77 @@ def _select_threshold(y_true, y_proba, target_recall: float) -> tuple[float, dic
     return round(best_threshold, 2), {"sweep": swept}
 
 
-def train_and_evaluate(X: pd.DataFrame, y: pd.Series) -> tuple[lgb.LGBMClassifier, dict]:
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=config.TEST_SIZE, random_state=config.RANDOM_STATE, stratify=y,
+def train_and_evaluate(X: pd.DataFrame, y: pd.Series, urls: pd.Series) -> tuple[dict, dict]:
+    """
+    Returns (models_dict, metrics). models_dict always has "lgbm"; if
+    config.NGRAM_ENABLED, it also has "ngram_vectorizer" and "ngram_clf".
+    `urls` must be aligned index-for-index with X/y (same dataframe's "url"
+    column) so the same train/test split applies to both feature sets.
+    """
+    indices = X.index
+    train_idx, test_idx, y_train, y_test = train_test_split(
+        indices, y, test_size=config.TEST_SIZE, random_state=config.RANDOM_STATE, stratify=y,
     )
+    X_train, X_test = X.loc[train_idx], X.loc[test_idx]
+
     log.info("Training LightGBM (n_estimators=%d)...", config.N_ESTIMATORS)
-    # LightGBM uses histogram-based binning internally, which is why it needs
-    # far less RAM than RandomForest for the same row count - it doesn't hold
-    # many full deep trees in memory at once, and bins continuous features
-    # (like entropy, url_length) into discrete buckets before splitting.
-    model = lgb.LGBMClassifier(
+    lgbm_model = lgb.LGBMClassifier(
         n_estimators=config.N_ESTIMATORS,
-        num_leaves=63,          # more leaves per tree = more expressive splits
-        learning_rate=0.05,     # lower rate + more estimators = better convergence
+        num_leaves=63,
+        learning_rate=0.05,
         min_child_samples=20,
         random_state=config.RANDOM_STATE,
         n_jobs=-1,
-        is_unbalance=True,  # same purpose as RandomForest's class_weight="balanced"
+        is_unbalance=True,
         verbose=-1,
     )
-    model.fit(X_train, y_train)
+    lgbm_model.fit(X_train, y_train)
+    lgbm_proba = lgbm_model.predict_proba(X_test)[:, 1]
 
-    y_proba = model.predict_proba(X_test)[:, 1]
+    models = {"lgbm": lgbm_model}
+    ngram_vectorizer = ngram_clf = None
+    ngram_roc_auc = None
 
-    # Default-threshold (0.5) metrics, kept for comparison/transparency.
+    if config.NGRAM_ENABLED:
+        urls_train = urls.loc[train_idx].tolist()
+        urls_test = urls.loc[test_idx].tolist()
+        ngram_vectorizer, ngram_clf = train_ngram_model(urls_train, y_train)
+        ngram_proba = predict_ngram_proba(ngram_vectorizer, ngram_clf, urls_test)
+        ngram_roc_auc = round(roc_auc_score(y_test, ngram_proba), 4)
+        models["ngram_vectorizer"] = ngram_vectorizer
+        models["ngram_clf"] = ngram_clf
+
+        # Ensemble: weighted average of both models' probabilities. This is
+        # standard model stacking - combining two models that make different
+        # kinds of errors (LightGBM: weak on bare domains; n-gram: no
+        # awareness of high-risk TLDs or IP-host structure) usually
+        # outperforms either alone.
+        w = config.ENSEMBLE_LGBM_WEIGHT
+        y_proba = w * lgbm_proba + (1 - w) * ngram_proba
+        log.info("N-gram model standalone ROC-AUC: %.4f (LightGBM: %.4f)",
+                  ngram_roc_auc, roc_auc_score(y_test, lgbm_proba))
+    else:
+        y_proba = lgbm_proba
+
     y_pred_default = (y_proba >= 0.5).astype(int)
     default_recall = round(recall_score(y_test, y_pred_default), 4)
     default_precision = round(precision_score(y_test, y_pred_default), 4)
 
-    # Tuned threshold: lowest cutoff that reaches the target recall, chosen
-    # to maximize precision subject to that constraint.
     tuned_threshold, sweep_info = _select_threshold(y_test, y_proba, config.MIN_ACCEPTABLE_RECALL)
     y_pred_tuned = (y_proba >= tuned_threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred_tuned).tolist()
 
     metrics = {
+        "ensemble_enabled": config.NGRAM_ENABLED,
         "decision_threshold": tuned_threshold,
         "accuracy": round(accuracy_score(y_test, y_pred_tuned), 4),
         "precision": round(precision_score(y_test, y_pred_tuned), 4),
         "recall": round(recall_score(y_test, y_pred_tuned), 4),
         "f1": round(f1_score(y_test, y_pred_tuned), 4),
-        "roc_auc": round(roc_auc_score(y_test, y_proba), 4),  # threshold-independent, unchanged
-        "confusion_matrix": cm,  # [[TN, FP], [FN, TP]]
+        "roc_auc": round(roc_auc_score(y_test, y_proba), 4),
+        "lgbm_only_roc_auc": round(roc_auc_score(y_test, lgbm_proba), 4),
+        "ngram_only_roc_auc": ngram_roc_auc,
+        "confusion_matrix": cm,
         "n_train": len(X_train),
         "n_test": len(X_test),
         "default_threshold_comparison": {
@@ -185,10 +215,10 @@ def train_and_evaluate(X: pd.DataFrame, y: pd.Series) -> tuple[lgb.LGBMClassifie
             "recall": default_recall,
         },
         "feature_importances": dict(zip(
-            X.columns, [round(float(v), 4) for v in model.feature_importances_]
+            X.columns, [round(float(v), 4) for v in lgbm_model.feature_importances_]
         )),
     }
-    return model, metrics
+    return models, metrics
 
 
 
@@ -197,7 +227,7 @@ def main() -> int:
 
     df = load_raw_data(config.RAW_DATA_FILE, config.TRAIN_SAMPLE_ROWS)
     X, y = build_feature_matrix(df)
-    model, metrics = train_and_evaluate(X, y)
+    models, metrics = train_and_evaluate(X, y, df["url"])
 
     log.info("Evaluation metrics: %s", json.dumps(
         {k: v for k, v in metrics.items() if k != "feature_importances"}, indent=2))
@@ -211,10 +241,17 @@ def main() -> int:
         )
         return 1
 
-    joblib.dump(
-        {"model": model, "decision_threshold": metrics["decision_threshold"]},
-        config.MODEL_FILE,
-    )
+    bundle = {
+        "model": models["lgbm"],
+        "decision_threshold": metrics["decision_threshold"],
+        "ensemble_enabled": metrics["ensemble_enabled"],
+    }
+    if metrics["ensemble_enabled"]:
+        bundle["ngram_vectorizer"] = models["ngram_vectorizer"]
+        bundle["ngram_clf"] = models["ngram_clf"]
+        bundle["ensemble_lgbm_weight"] = config.ENSEMBLE_LGBM_WEIGHT
+
+    joblib.dump(bundle, config.MODEL_FILE)
     with open(config.METRICS_FILE, "w") as f:
         json.dump(metrics, f, indent=2)
 

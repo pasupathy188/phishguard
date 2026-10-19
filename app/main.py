@@ -16,8 +16,6 @@ Fixes vs. the original draft:
     since requiring a live Kafka cluster just to serve predictions is
     unnecessary coupling for most deployments.
 """
-from __future__ import annotations
-
 import logging
 import sys
 import threading
@@ -30,11 +28,14 @@ import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Security, Request
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import config
 from app.features import extract_features, is_known_safe_domain
@@ -54,6 +55,19 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+def serve_ui():
+    """Serves the simple web UI at the root path. The /predict and /health
+    JSON endpoints are unaffected - this just gives a browser something
+    friendlier than a 404 or a bare JSON API to look at."""
+    index_path = _STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="UI not found")
+    return FileResponse(index_path)
+
 # --- API key auth ---
 # Disabled entirely if PHISHGUARD_API_KEYS is unset/empty (local dev default).
 # Set PHISHGUARD_API_KEYS (comma-separated) to enable it in any shared env.
@@ -72,10 +86,14 @@ _model = None
 _decision_threshold = 0.5
 _model_load_error: Optional[str] = None
 _kafka_consumer_alive = threading.Event()  # only meaningful if Kafka enabled
+_ngram_vectorizer = None
+_ngram_clf = None
+_ensemble_lgbm_weight = 1.0
 
 
 def load_model():
     global _model, _decision_threshold, _model_load_error
+    global _ngram_vectorizer, _ngram_clf, _ensemble_lgbm_weight
     model_path = get_current_model_file(config.MODEL_DIR, config.MODEL_FILE)
     try:
         bundle = joblib.load(model_path)
@@ -84,11 +102,16 @@ def load_model():
         if isinstance(bundle, dict) and "model" in bundle:
             _model = bundle["model"]
             _decision_threshold = bundle.get("decision_threshold", 0.5)
+            if bundle.get("ensemble_enabled"):
+                _ngram_vectorizer = bundle.get("ngram_vectorizer")
+                _ngram_clf = bundle.get("ngram_clf")
+                _ensemble_lgbm_weight = bundle.get("ensemble_lgbm_weight", 1.0)
         else:
             _model = bundle
             _decision_threshold = 0.5
-        log.info("Model loaded from %s (decision_threshold=%.2f)",
-                  model_path, _decision_threshold)
+        ensemble_note = " + n-gram ensemble" if _ngram_vectorizer is not None else ""
+        log.info("Model loaded from %s (decision_threshold=%.2f%s)",
+                  model_path, _decision_threshold, ensemble_note)
     except FileNotFoundError:
         _model_load_error = f"Model file not found at {model_path}. Run training first."
         log.error(_model_load_error)
@@ -98,6 +121,23 @@ def load_model():
 
 
 load_model()
+
+
+def _predict_proba(feats_dict: dict, url: str) -> float:
+    """
+    Returns the phishing-class probability for one URL, combining the
+    lexical-feature model with the n-gram model when the ensemble is
+    enabled (falls back to the lexical model alone otherwise - fully
+    backward compatible with model files trained before the ensemble
+    existed).
+    """
+    X = pd.DataFrame([feats_dict])
+    lgbm_proba = float(_model.predict_proba(X)[0, 1])
+    if _ngram_vectorizer is not None and _ngram_clf is not None:
+        ngram_vec = _ngram_vectorizer.transform([url])
+        ngram_proba = float(_ngram_clf.predict_proba(ngram_vec)[0, 1])
+        return _ensemble_lgbm_weight * lgbm_proba + (1 - _ensemble_lgbm_weight) * ngram_proba
+    return lgbm_proba
 
 
 class URLInput(BaseModel):
@@ -172,8 +212,7 @@ def predict_url(request: Request, input: URLInput, _auth: None = Security(requir
                 source="allowlist",
             )
 
-        X = pd.DataFrame([feats.to_dict()])
-        proba = float(_model.predict_proba(X)[0, 1])
+        proba = _predict_proba(feats.to_dict(), input.url)
         pred = int(proba >= _decision_threshold)
     except Exception as e:  # noqa: BLE001 - boundary catch, never leak raw traceback to client
         log.exception("Prediction failed for input url (length=%d)", len(input.url))
@@ -214,8 +253,7 @@ def _consume_live_urls():
                     continue
                 url = msg.value
                 feats = extract_features(url)
-                X = pd.DataFrame([feats.to_dict()])
-                proba = float(_model.predict_proba(X)[0, 1])
+                proba = _predict_proba(feats.to_dict(), url)
                 pred = int(proba >= _decision_threshold)
                 log.info("live_prediction is_phishing=%s conf=%.3f url=%.80s",
                           bool(pred), proba, url)

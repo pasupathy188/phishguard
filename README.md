@@ -42,6 +42,20 @@ train/serve skew.
 
 ## The real debugging journey (what actually happened, in order)
 
+0. **N-gram ensemble added to address the allowlist's root cause** (most
+   recent addition): the allowlist (step 7 below) patches false positives on
+   ~20 hardcoded known-safe domains, but doesn't help with legitimate sites
+   NOT on that list, and doesn't help catch phishing brand-lookalikes not on
+   the hardcoded `IMPERSONATED_BRANDS` list either. A character n-gram
+   (3-5 char, TF-IDF) + Logistic Regression model, trained on raw URL
+   strings directly, sees substring patterns like "payp" + "4l" co-occurring
+   without needing them enumerated in advance - this generalizes to brands
+   and obfuscation patterns the hand-crafted feature model can't see.
+   Combined with LightGBM via weighted probability averaging
+   (`PHISHGUARD_ENSEMBLE_LGBM_WEIGHT`, default 0.6/0.4). Enable/disable via
+   `PHISHGUARD_NGRAM_ENABLED` (default true) - fully backward compatible
+   with model files saved before this existed.
+
 This project went through several rounds of finding and fixing genuine
 issues — worth documenting because the *process* is the actual MLOps
 learning, not just the final numbers.

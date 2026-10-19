@@ -20,6 +20,20 @@ RANDOM_STATE = int(os.getenv("PHISHGUARD_RANDOM_STATE", "42"))
 N_ESTIMATORS = int(os.getenv("PHISHGUARD_N_ESTIMATORS", "200"))
 MIN_ACCEPTABLE_RECALL = float(os.getenv("PHISHGUARD_MIN_RECALL", "0.85"))
 
+# --- N-gram ensemble model ---
+# The lexical/structural feature model (LightGBM) has documented weak signal
+# on bare/short domains (see README: the false-positive incident). A
+# character n-gram model sees raw substrings directly (e.g. "payp4l",
+# "arnaz0n") without needing them hand-coded as a feature, so it catches
+# patterns the engineered features miss. Combined via probability averaging.
+NGRAM_ENABLED = os.getenv("PHISHGUARD_NGRAM_ENABLED", "true").lower() == "true"
+NGRAM_RANGE_MIN = int(os.getenv("PHISHGUARD_NGRAM_MIN", "3"))
+NGRAM_RANGE_MAX = int(os.getenv("PHISHGUARD_NGRAM_MAX", "5"))
+NGRAM_MAX_FEATURES = int(os.getenv("PHISHGUARD_NGRAM_MAX_FEATURES", "20000"))
+# Weight given to the LightGBM model's probability vs the n-gram model's
+# when combining (0.6 = 60% lexical-feature model, 40% n-gram model).
+ENSEMBLE_LGBM_WEIGHT = float(os.getenv("PHISHGUARD_ENSEMBLE_LGBM_WEIGHT", "0.6"))
+
 # --- Serving ---
 API_HOST = os.getenv("PHISHGUARD_API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("PHISHGUARD_API_PORT", "8000"))
